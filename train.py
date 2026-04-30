@@ -25,6 +25,7 @@ from config import (
 from env import VideoStreamingEnv
 from model.network import ActorCritic, normalise_state
 from model.a2c import A2CTrainer, RolloutBuffer, Transition
+from model.ppo import PPOTrainer
 from traces.loader import load_or_generate
 
 
@@ -115,7 +116,9 @@ def load_checkpoint(path: str, model: ActorCritic):
 
 def train(args):
     set_seeds(42)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # device = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
+    # device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    device = torch.device("cpu")
     print(f"Device: {device}")
 
     # Data
@@ -127,7 +130,8 @@ def train(args):
 
     # Model + trainer
     model   = ActorCritic().to(device)
-    trainer = A2CTrainer(model)
+    trainer = PPOTrainer(model) if args.algo == "ppo" else A2CTrainer(model)
+    print(f"Algorithm: {args.algo.upper()}")
     env     = VideoStreamingEnv()
 
     best_val_qoe = -float("inf")
@@ -194,6 +198,8 @@ def parse_args():
                    help="Number of training iterations.")
     p.add_argument("--n-synthetic", type=int,  default=1000,
                    help="Number of synthetic traces to generate if no --traces given.")
+    p.add_argument("--algo",        type=str,  default="ppo", choices=["ppo", "a2c"],
+                   help="Training algorithm (default: ppo).")
     return p.parse_args()
 
 

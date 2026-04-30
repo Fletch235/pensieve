@@ -26,11 +26,13 @@ def _conv_out_len(in_len: int, kernel: int = _CNN_KERNEL) -> int:
 
 
 # Input widths after flattening each CNN branch
-_TPUT_FLAT   = _CNN_FILTERS * _conv_out_len(HISTORY_LEN)     # 128 × 5 = 640
-_TIME_FLAT   = _CNN_FILTERS * _conv_out_len(HISTORY_LEN)     # 128 × 5 = 640
-_SIZES_FLAT  = _CNN_FILTERS * _conv_out_len(NUM_BITRATES)    # 128 × 3 = 384
-_SCALAR_DIM  = 3                                              # buffer, remain, last_br
-_CONCAT_SIZE = _TPUT_FLAT + _TIME_FLAT + _SIZES_FLAT + _SCALAR_DIM   # 1667
+_TPUT_FLAT     = _CNN_FILTERS * _conv_out_len(HISTORY_LEN)     # 128 × 5 = 640
+_TIME_FLAT     = _CNN_FILTERS * _conv_out_len(HISTORY_LEN)     # 128 × 5 = 640
+_SIZES_FLAT    = _CNN_FILTERS * _conv_out_len(NUM_BITRATES)    # 128 × 3 = 384
+_REBUF_FLAT    = _CNN_FILTERS * _conv_out_len(HISTORY_LEN)     # 128 × 5 = 640
+_BRHIST_FLAT   = _CNN_FILTERS * _conv_out_len(HISTORY_LEN)     # 128 × 5 = 640
+_SCALAR_DIM    = 5   # buffer, remain, last_br, tput_cv, buffer_fill_rate
+_CONCAT_SIZE   = _TPUT_FLAT + _TIME_FLAT + _SIZES_FLAT + _REBUF_FLAT + _BRHIST_FLAT + _SCALAR_DIM  # 2949
 
 
 class ActorCritic(nn.Module):
@@ -45,9 +47,11 @@ class ActorCritic(nn.Module):
         self.num_bitrates = num_bitrates
 
         # 1D-CNN branches — each takes (batch, 1, seq_len)
-        self.tput_conv  = nn.Conv1d(1, _CNN_FILTERS, kernel_size=_CNN_KERNEL)
-        self.time_conv  = nn.Conv1d(1, _CNN_FILTERS, kernel_size=_CNN_KERNEL)
-        self.size_conv  = nn.Conv1d(1, _CNN_FILTERS, kernel_size=_CNN_KERNEL)
+        self.tput_conv   = nn.Conv1d(1, _CNN_FILTERS, kernel_size=_CNN_KERNEL)
+        self.time_conv   = nn.Conv1d(1, _CNN_FILTERS, kernel_size=_CNN_KERNEL)
+        self.size_conv   = nn.Conv1d(1, _CNN_FILTERS, kernel_size=_CNN_KERNEL)
+        self.rebuf_conv  = nn.Conv1d(1, _CNN_FILTERS, kernel_size=_CNN_KERNEL)
+        self.brhist_conv = nn.Conv1d(1, _CNN_FILTERS, kernel_size=_CNN_KERNEL)
 
         # Shared hidden layer
         self.hidden = nn.Linear(_CONCAT_SIZE, _HIDDEN_SIZE)
@@ -69,20 +73,26 @@ class ActorCritic(nn.Module):
         state values are plain tensors, shape (batch, dim).
         Returns: logits (batch, num_bitrates), value (batch, 1)
         """
-        tput   = state["throughputs"]    # (batch, HISTORY_LEN)
-        times  = state["download_times"] # (batch, HISTORY_LEN)
-        sizes  = state["chunk_sizes"]    # (batch, NUM_BITRATES)
-        buf    = state["buffer"]         # (batch, 1)
-        remain = state["chunks_remaining"]  # (batch, 1)
-        last_r = state["last_bitrate"]   # (batch, 1)
+        tput   = state["throughputs"]        # (batch, HISTORY_LEN)
+        times  = state["download_times"]      # (batch, HISTORY_LEN)
+        sizes  = state["chunk_sizes"]          # (batch, NUM_BITRATES)
+        buf    = state["buffer"]               # (batch, 1)
+        remain = state["chunks_remaining"]    # (batch, 1)
+        last_r = state["last_bitrate"]        # (batch, 1)
+        rebuf  = state["rebuffer_history"]    # (batch, HISTORY_LEN)
+        brhist = state["bitrate_history"]     # (batch, HISTORY_LEN)
+        cv     = state["tput_cv"]              # (batch, 1)
+        bfr    = state["buffer_fill_rate"]    # (batch, 1)
 
         # Unsqueeze channel dim for Conv1d: (batch, 1, seq_len)
-        t1 = F.relu(self.tput_conv(tput.unsqueeze(1))).flatten(1)    # (batch, 640)
-        t2 = F.relu(self.time_conv(times.unsqueeze(1))).flatten(1)   # (batch, 640)
-        t3 = F.relu(self.size_conv(sizes.unsqueeze(1))).flatten(1)   # (batch, 384)
+        t1 = F.relu(self.tput_conv(tput.unsqueeze(1))).flatten(1)      # (batch, 640)
+        t2 = F.relu(self.time_conv(times.unsqueeze(1))).flatten(1)     # (batch, 640)
+        t3 = F.relu(self.size_conv(sizes.unsqueeze(1))).flatten(1)     # (batch, 384)
+        t4 = F.relu(self.rebuf_conv(rebuf.unsqueeze(1))).flatten(1)    # (batch, 640)
+        t5 = F.relu(self.brhist_conv(brhist.unsqueeze(1))).flatten(1)  # (batch, 640)
 
-        x = torch.cat([t1, t2, t3, buf, remain, last_r], dim=1)      # (batch, 1667)
-        h = F.relu(self.hidden(x))                                    # (batch, 128)
+        x = torch.cat([t1, t2, t3, t4, t5, buf, remain, last_r, cv, bfr], dim=1)  # (batch, 2949)
+        h = F.relu(self.hidden(x))                                      # (batch, 128)
 
         logits = self.actor_head(h)   # (batch, num_bitrates) — raw, no softmax
         value  = self.critic_head(h)  # (batch, 1)
@@ -99,12 +109,16 @@ def normalise_state(state: dict, device: torch.device) -> dict:
         return torch.tensor(a / norm, dtype=torch.float32, device=device).unsqueeze(0)
 
     return {
-        "throughputs":      t(state["throughputs"],    _MAX_TPUT_MBPS),
-        "download_times":   t(state["download_times"], BUFFER_CAP_SEC),
-        "chunk_sizes":      t(state["chunk_sizes"],    _MAX_CHUNK_BYTES),
-        "buffer":           t([state["buffer"]],       BUFFER_CAP_SEC),
+        "throughputs":      t(state["throughputs"],      _MAX_TPUT_MBPS),
+        "download_times":   t(state["download_times"],   BUFFER_CAP_SEC),
+        "chunk_sizes":      t(state["chunk_sizes"],      _MAX_CHUNK_BYTES),
+        "buffer":           t([state["buffer"]],         BUFFER_CAP_SEC),
         "chunks_remaining": t([state["chunks_remaining"]], NUM_CHUNKS),
-        "last_bitrate":     t([state["last_bitrate"]],  NUM_BITRATES - 1),
+        "last_bitrate":     t([state["last_bitrate"]],   NUM_BITRATES - 1),
+        "rebuffer_history": t(state["rebuffer_history"], BUFFER_CAP_SEC),
+        "bitrate_history":  t(state["bitrate_history"],  NUM_BITRATES - 1),
+        "tput_cv":          t([state["tput_cv"]],        3.0),   # CV rarely exceeds 3
+        "buffer_fill_rate": t([state["buffer_fill_rate"]], 1.0), # already in [−1, 1] range
     }
 
 
@@ -123,6 +137,10 @@ if __name__ == "__main__":
         "buffer":           np.float32(10.0),
         "chunks_remaining": np.float32(24.0),
         "last_bitrate":     np.float32(2.0),
+        "rebuffer_history": np.zeros(HISTORY_LEN, dtype=np.float32),
+        "bitrate_history":  np.random.randint(0, NUM_BITRATES, HISTORY_LEN).astype(np.float32),
+        "tput_cv":          np.float32(0.3),
+        "buffer_fill_rate": np.float32(0.1),
     }
     normed = normalise_state(dummy, torch.device("cpu"))
     logits, value = model(normed)

@@ -31,6 +31,10 @@ class VideoStreamingEnv:
     buffer          : float scalar                   — current buffer occupancy (s)
     chunks_remaining: float scalar                   — chunks left including current
     last_bitrate    : float scalar                   — last chosen bitrate index (0–5)
+    rebuffer_history: float32 array (HISTORY_LEN,)  — seconds of rebuffer per past chunk
+    bitrate_history : float32 array (HISTORY_LEN,)  — bitrate index chosen per past chunk
+    tput_cv         : float scalar                   — throughput coeff. of variation
+    buffer_fill_rate: float scalar                   — (buffer_now - buffer_prev) / CHUNK_DURATION_SEC
     """
 
     def __init__(self, trace: Optional[list[float]] = None):
@@ -104,11 +108,16 @@ class VideoStreamingEnv:
         measured_tput = chunk_bytes * 8 / 1e6 / download_time    # actual Mbps
 
         # --- Advance state ----------------------------------------------------
-        self._tput_history   = np.roll(self._tput_history,   -1)
-        self._dl_time_history = np.roll(self._dl_time_history, -1)
-        self._tput_history[-1]    = measured_tput
-        self._dl_time_history[-1] = download_time
+        self._tput_history     = np.roll(self._tput_history,     -1)
+        self._dl_time_history  = np.roll(self._dl_time_history,  -1)
+        self._rebuffer_history = np.roll(self._rebuffer_history, -1)
+        self._bitrate_history  = np.roll(self._bitrate_history,  -1)
+        self._tput_history[-1]     = measured_tput
+        self._dl_time_history[-1]  = download_time
+        self._rebuffer_history[-1] = rebuffer_sec
+        self._bitrate_history[-1]  = float(action)
 
+        self._prev_buffer = buffer_before
         self._buffer      = buffer_after
         self._last_action = action
         self._chunk_idx  += 1
@@ -130,12 +139,15 @@ class VideoStreamingEnv:
     # ------------------------------------------------------------------
 
     def _reset_state(self):
-        self._chunk_idx      = 0
-        self._trace_idx      = 0
-        self._buffer         = 0.0
-        self._last_action    = 0
-        self._tput_history   = np.zeros(HISTORY_LEN, dtype=np.float32)
-        self._dl_time_history = np.zeros(HISTORY_LEN, dtype=np.float32)
+        self._chunk_idx        = 0
+        self._trace_idx        = 0
+        self._buffer           = 0.0
+        self._last_action      = 0
+        self._tput_history     = np.zeros(HISTORY_LEN, dtype=np.float32)
+        self._dl_time_history  = np.zeros(HISTORY_LEN, dtype=np.float32)
+        self._rebuffer_history = np.zeros(HISTORY_LEN, dtype=np.float32)
+        self._bitrate_history  = np.zeros(HISTORY_LEN, dtype=np.float32)
+        self._prev_buffer      = 0.0
 
     def _get_state(self) -> dict:
         next_chunk_idx = min(self._chunk_idx, NUM_CHUNKS - 1)
@@ -143,6 +155,13 @@ class VideoStreamingEnv:
             [CHUNK_SIZES[next_chunk_idx][b] for b in range(NUM_BITRATES)],
             dtype=np.float32,
         )
+        # Throughput coefficient of variation (0 when no history yet)
+        tput_mean = float(np.mean(self._tput_history))
+        tput_std  = float(np.std(self._tput_history))
+        tput_cv   = tput_std / (tput_mean + 1e-6)
+
+        buffer_fill_rate = (self._buffer - self._prev_buffer) / CHUNK_DURATION_SEC
+
         return {
             "throughputs":      self._tput_history.copy(),
             "download_times":   self._dl_time_history.copy(),
@@ -150,6 +169,10 @@ class VideoStreamingEnv:
             "buffer":           np.float32(self._buffer),
             "chunks_remaining": np.float32(NUM_CHUNKS - self._chunk_idx),
             "last_bitrate":     np.float32(self._last_action),
+            "rebuffer_history": self._rebuffer_history.copy(),
+            "bitrate_history":  self._bitrate_history.copy(),
+            "tput_cv":          np.float32(tput_cv),
+            "buffer_fill_rate": np.float32(buffer_fill_rate),
         }
 
 

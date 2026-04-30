@@ -28,11 +28,13 @@ ACTOR_LR            = 1e-4
 CRITIC_LR           = 1e-3
 ENTROPY_BETA_START  = 1.0
 ENTROPY_BETA_END    = 0.1
-ENTROPY_BETA_DECAY  = 100_000   # linear decay over this many training steps
+ENTROPY_BETA_DECAY  = 1_200_000   # linear decay over this many training steps
 NUM_TRAIN_ITERS     = 50_000
 CHECKPOINT_EVERY    = 1_000
 GRAD_CLIP_NORM      = 0.5
-
+# PPO-specific
+PPO_CLIP_EPS        = 0.2   # ε in the clipped surrogate objective
+PPO_EPOCHS          = 4     # gradient epochs per collected rollout
 # ---------------------------------------------------------------------------
 # Data splits
 # ---------------------------------------------------------------------------

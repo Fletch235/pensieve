@@ -1,0 +1,3 @@
+[submodule "traces/ext"]
+	path = traces/ext
+	url = git@github.com:confiwent/Real-world-bandwidth-traces.git
