@@ -35,6 +35,9 @@ GRAD_CLIP_NORM      = 0.5
 # PPO-specific
 PPO_CLIP_EPS        = 0.2   # ε in the clipped surrogate objective
 PPO_EPOCHS          = 4     # gradient epochs per collected rollout
+
+# A3C-specific
+A3C_NUM_WORKERS     = 8     # parallel worker processes
 # ---------------------------------------------------------------------------
 # Data splits
 # ---------------------------------------------------------------------------
